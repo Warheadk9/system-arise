@@ -12155,18 +12155,55 @@ hpMult and dmgMult range 0.5-3.0. aggression 0.2-0.99. rageThreshold 0.3-0.5 for
                 USER.gold = (USER.gold||0) - betGold;
                 USER.xp = (USER.xp||0) - betXP;
                 closeAIBetSetup();
-                startAIBetBattle(tierKey, betGold, betXP);
+                openAICharacterSelect(tierKey, betGold, betXP);
             }).catch(err => alert('❌ '+err.message));
         }
 
         let aiBetState = null;
 
-        function startAIBetBattle(tierKey, betGold, betXP){
+        // ── CHARACTER SELECT ─────────────────────────────────────
+        function openAICharacterSelect(tierKey, betGold, betXP){
+            let tiles = '';
+            CHARACTER_SPRITES.forEach((spr, i) => {
+                tiles += `<button onclick="pickAIDuelCharacter(${i},'${tierKey}',${betGold},${betXP})" style="background:#111;border:2px solid #a020f0;border-radius:10px;padding:8px;cursor:pointer;">
+                    <div style="width:64px;height:64px;margin:0 auto;background-image:url('${spr.idle}');background-repeat:no-repeat;background-position:0 0;background-size:256px 256px;image-rendering:pixelated;"></div>
+                    <div style="color:#c060ff;font-size:11px;font-weight:bold;margin-top:4px;">Hunter ${i+1}</div>
+                </button>`;
+            });
+            const html = `
+            <div id="ai-char-select-backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:9998;display:flex;align-items:center;justify-content:center;padding:16px;">
+                <div style="background:linear-gradient(135deg,#0a0a1a,#1a1a3e);border:3px solid #a020f0;border-radius:14px;max-width:480px;width:100%;padding:22px;">
+                    <h2 style="color:#c060ff;text-align:center;margin:0 0 6px 0;">Choose Your Character</h2>
+                    <p style="color:#888;text-align:center;font-size:12px;margin:0 0 16px 0;">This is who shows up in the arena.</p>
+                    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">${tiles}</div>
+                </div>
+            </div>`;
+            document.body.insertAdjacentHTML('beforeend', html);
+        }
+
+        function pickAIDuelCharacter(idx, tierKey, betGold, betXP){
+            const el = document.getElementById('ai-char-select-backdrop');
+            if(el) el.remove();
+            startAIBetBattle(tierKey, betGold, betXP, idx);
+        }
+
+        // ── ARENA SETUP ───────────────────────────────────────────
+        const AI_ATTACK_ANIM_POOL = {
+            easy:   ['slash','punch'],
+            normal: ['slash','punch','kick'],
+            hard:   ['slash','punch','kick','fire'],
+            brutal: ['slash','kick','fire','lightning']
+        };
+
+        function startAIBetBattle(tierKey, betGold, betXP, hunterSpriteIdx){
             const tier = AI_BET_TIERS[tierKey];
             const hunterMaxHP = USER.maxHP || Math.max(100, (USER.level||1)*10 + 50);
             const hunterDamage = calculatePlayerDamage(USER);
+            let aiSpriteIdx = (hunterSpriteIdx + 1 + Math.floor(Math.random()*(CHARACTER_SPRITES.length-1))) % CHARACTER_SPRITES.length;
+
             aiBetState = {
                 tierKey, tier, betGold, betXP,
+                hunterSpriteIdx, aiSpriteIdx,
                 hunterHP: USER.hp || hunterMaxHP,
                 hunterMaxHP,
                 hunterGuarding: false,
@@ -12176,95 +12213,202 @@ hpMult and dmgMult range 0.5-3.0. aggression 0.2-0.99. rageThreshold 0.3-0.5 for
                 aiHealCooldown: 0,
                 aiGuarding: false,
                 log: [],
-                isActive: true
+                isActive: true,
+                actionsLocked: false
             };
-            renderAIBetBattle();
+
+            buildAIDuelOverlay();
+            document.getElementById('ai-duel-overlay')?.classList.add('active');
+            checkAIDuelRotate();
+            renderAIDuelArena();
         }
 
-        function renderAIBetBattle(){
+        function buildAIDuelOverlay(){
+            if(document.getElementById('ai-duel-overlay')) return;
+            const html = `
+            <div id="ai-duel-overlay" style="display:none;position:fixed;inset:0;background:#050510;z-index:9500;">
+                <button onclick="surrenderAIBet()" style="position:absolute;top:8px;left:8px;z-index:9530;background:rgba(0,0,0,0.6);border:1px solid #444;color:#888;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;">✕ Exit</button>
+
+                <div style="position:absolute;top:8px;left:70px;right:70px;display:flex;justify-content:space-between;gap:10px;z-index:9520;">
+                    <div style="flex:1;">
+                        <div id="ai-duel-hunter-name" style="color:#0f0;font-size:11px;font-weight:bold;"></div>
+                        <div style="background:#000;border:2px solid #0f0;border-radius:6px;height:16px;overflow:hidden;"><div id="ai-duel-hunter-bar" style="background:linear-gradient(90deg,#0a0,#0f0);height:100%;width:100%;transition:width 0.3s;"></div></div>
+                        <div id="ai-duel-hunter-text" style="color:#0f0;font-size:10px;"></div>
+                    </div>
+                    <div style="flex:1;text-align:right;">
+                        <div id="ai-duel-ai-name" style="color:#c060ff;font-size:11px;font-weight:bold;"></div>
+                        <div style="background:#000;border:2px solid #a020f0;border-radius:6px;height:16px;overflow:hidden;"><div id="ai-duel-ai-bar" style="background:linear-gradient(90deg,#6a00a0,#a020f0);height:100%;width:100%;margin-left:auto;transition:width 0.3s;"></div></div>
+                        <div id="ai-duel-ai-text" style="color:#c060ff;font-size:10px;"></div>
+                    </div>
+                </div>
+
+                <div id="ai-duel-hunter-wrap" style="position:absolute;bottom:30%;left:15%;text-align:center;z-index:9505;">
+                    <div id="ai-duel-hunter-sprite" class="hunter-sprite"></div>
+                </div>
+                <div id="ai-duel-ai-wrap" style="position:absolute;bottom:30%;right:15%;text-align:center;z-index:9505;">
+                    <div id="ai-duel-ai-sprite" class="hunter-sprite" style="filter:drop-shadow(0 0 6px rgba(255,0,0,0.6)) hue-rotate(200deg);"></div>
+                </div>
+
+                <div id="ai-duel-log" style="position:absolute;bottom:150px;left:5%;right:5%;max-height:70px;overflow-y:auto;background:rgba(0,0,0,0.6);border-left:3px solid #a020f0;border-radius:6px;padding:6px 10px;z-index:9520;"></div>
+
+                <div id="ai-duel-actions" style="position:absolute;bottom:10px;left:5%;right:5%;z-index:9520;"></div>
+
+                <div id="ai-duel-rotate-prompt" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:9990;flex-direction:column;align-items:center;justify-content:center;color:#0ef;text-align:center;padding:20px;">
+                    <p style="font-size:40px;margin:0 0 10px 0;">📱↻</p>
+                    <p style="font-size:15px;margin:0 0 16px 0;">Rotate your device for the best arena view</p>
+                    <button onclick="document.getElementById('ai-duel-rotate-prompt').style.display='none'" style="padding:10px 24px;background:#0ef;color:#000;border:none;border-radius:8px;font-size:14px;font-weight:bold;cursor:pointer;">Continue Anyway</button>
+                </div>
+            </div>`;
+            document.body.insertAdjacentHTML('beforeend', html);
+            const overlay = document.getElementById('ai-duel-overlay');
+            const style = document.createElement('style');
+            style.textContent = '#ai-duel-overlay.active{display:block;}';
+            document.head.appendChild(style);
+        }
+
+        function checkAIDuelRotate(){
+            const overlay = document.getElementById('ai-duel-overlay');
+            const active = overlay && overlay.classList.contains('active');
+            const prompt = document.getElementById('ai-duel-rotate-prompt');
+            if(!prompt) return;
+            if(!active){ prompt.style.display = 'none'; return; }
+            const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 768;
+            const isPortrait = window.innerHeight > window.innerWidth;
+            prompt.style.display = (isMobile && isPortrait) ? 'flex' : 'none';
+        }
+        window.addEventListener('resize', checkAIDuelRotate);
+        window.addEventListener('orientationchange', checkAIDuelRotate);
+
+        function renderAIDuelArena(){
             const s = aiBetState;
             if(!s || !s.isActive) return;
+
+            const hSpr = CHARACTER_SPRITES[s.hunterSpriteIdx];
+            const aSpr = CHARACTER_SPRITES[s.aiSpriteIdx];
+            const hunterEl = document.getElementById('ai-duel-hunter-sprite');
+            const aiEl = document.getElementById('ai-duel-ai-sprite');
+            if(hunterEl) hunterEl.style.cssText += `width:96px;height:96px;background-image:url('${hSpr.idle}');background-repeat:no-repeat;background-position:0 0;background-size:288px 288px;image-rendering:pixelated;`;
+            if(aiEl) aiEl.style.cssText += `width:96px;height:96px;background-image:url('${aSpr.idle}');background-repeat:no-repeat;background-position:0 0;background-size:288px 288px;image-rendering:pixelated;filter:drop-shadow(0 0 6px rgba(255,0,0,0.6)) hue-rotate(200deg);`;
+
+            document.getElementById('ai-duel-hunter-name').textContent = USER.username || 'You';
+            document.getElementById('ai-duel-ai-name').textContent = s.tier.label + ' AI';
+            updateAIDuelHPBars();
+            renderAIDuelLog();
+            renderAIDuelActions();
+        }
+
+        function updateAIDuelHPBars(){
+            const s = aiBetState;
+            if(!s) return;
+            const hBar = document.getElementById('ai-duel-hunter-bar'), hTxt = document.getElementById('ai-duel-hunter-text');
+            const aBar = document.getElementById('ai-duel-ai-bar'), aTxt = document.getElementById('ai-duel-ai-text');
+            if(hBar){ hBar.style.width = Math.max(0,(s.hunterHP/s.hunterMaxHP)*100)+'%'; hTxt.textContent = `${Math.max(0,Math.floor(s.hunterHP))}/${s.hunterMaxHP}`; }
+            if(aBar){ aBar.style.width = Math.max(0,(s.aiHP/s.aiMaxHP)*100)+'%'; aTxt.textContent = `${Math.max(0,Math.floor(s.aiHP))}/${s.aiMaxHP}`; }
+        }
+
+        function renderAIDuelLog(){
+            const box = document.getElementById('ai-duel-log');
+            if(!box) return;
+            box.innerHTML = aiBetState.log.slice(-5).map(l => `<p style="color:#0cf;font-size:11px;margin:2px 0;">• ${l}</p>`).join('');
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function aiDuelFloatNumber(text, color, overAI){
+            const wrap = document.getElementById(overAI ? 'ai-duel-ai-wrap' : 'ai-duel-hunter-wrap');
+            if(!wrap) return;
+            const rect = wrap.getBoundingClientRect();
+            const el = document.createElement('div');
+            el.style.cssText = `position:fixed;left:${rect.left+rect.width/2-15}px;top:${rect.top-10}px;color:${color};font-weight:bold;font-size:18px;z-index:9600;pointer-events:none;transition:transform 1s ease-out,opacity 1s ease-out;text-shadow:0 0 6px #000;`;
+            el.textContent = text;
+            document.body.appendChild(el);
+            requestAnimationFrame(() => { el.style.transform = 'translateY(-40px)'; el.style.opacity = '0'; });
+            setTimeout(() => el.remove(), 1050);
+        }
+
+        function renderAIDuelActions(){
+            const s = aiBetState;
+            const box = document.getElementById('ai-duel-actions');
+            if(!box || !s) return;
+            if(s.actionsLocked){ box.innerHTML = `<p style="text-align:center;color:#ff0;font-size:12px;">⌛ ...</p>`; return; }
             const inventory = (USER.inventory||[]).filter(entry => ITEMS[typeof entry==='object'?entry.id:entry]);
             let itemsHTML = '';
             if(inventory.length){
-                itemsHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:8px;">';
+                itemsHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:6px;margin-bottom:6px;">';
                 inventory.forEach(entry => {
                     const itemId = typeof entry === 'object' ? entry.id : entry;
                     const item = ITEMS[itemId];
                     if(!item) return;
                     const statVal = item.damage ? Math.abs(item.damage) : item.heal ? item.heal : (item.protect||0);
                     const statLabel = item.damage ? `⚔️${statVal}` : item.heal ? `💚${statVal}` : `🛡️${statVal}`;
-                    itemsHTML += `<button onclick="doAIBetAction('item','${itemId}')" style="background:#1a2a1a;border:2px solid #a020f0;color:#c060ff;padding:8px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:bold;">${item.emoji||'📦'}<br>${item.name}<br><small>${statLabel}</small></button>`;
+                    itemsHTML += `<button onclick="doAIBetAction('item','${itemId}')" style="background:#1a2a1a;border:2px solid #a020f0;color:#c060ff;padding:6px;border-radius:6px;cursor:pointer;font-size:10px;font-weight:bold;">${item.emoji||'📦'}<br>${item.name}<br><small>${statLabel}</small></button>`;
                 });
                 itemsHTML += '</div>';
             } else {
-                itemsHTML = `<button onclick="doAIBetAction('attack')" style="width:100%;background:linear-gradient(135deg,#a020f0,#6a00a0);color:#fff;font-weight:bold;padding:14px;border:none;border-radius:8px;cursor:pointer;">⚔️ Bare-Hand Attack</button>`;
+                itemsHTML = `<button onclick="doAIBetAction('attack')" style="width:100%;background:linear-gradient(135deg,#a020f0,#6a00a0);color:#fff;font-weight:bold;padding:12px;border:none;border-radius:8px;cursor:pointer;margin-bottom:6px;">⚔️ Bare-Hand Attack</button>`;
             }
-
-            const html = `
-            <div style="background:linear-gradient(135deg,#0a0a1a,#1a1a3e);padding:20px;border:3px solid #a020f0;border-radius:12px;margin:20px auto;max-width:900px;">
-                <h2 style="color:#c060ff;text-align:center;margin:0 0 16px 0;">🤖 ${s.tier.label} AI DUEL — betting for ${s.tier.multiplier}x return</h2>
-
-                <div style="background:#1a1a2e;padding:16px;border-radius:10px;border:2px solid #0f0;margin-bottom:14px;">
-                    <p style="color:#0f0;margin:0 0 8px 0;font-weight:bold;">${USER.username} (You)</p>
-                    <p style="color:#0f0;margin:0 0 8px 0;">❤️ ${Math.max(0,Math.floor(s.hunterHP))}/${s.hunterMaxHP} HP</p>
-                    <div style="background:#000;border:2px solid #0f0;border-radius:6px;height:22px;overflow:hidden;">
-                        <div style="background:linear-gradient(90deg,#0a0,#0f0);height:100%;width:${Math.max(0,s.hunterHP/s.hunterMaxHP*100)}%;"></div>
-                    </div>
-                </div>
-
-                <div style="background:#2a0a3a;padding:16px;border-radius:10px;border:2px solid #a020f0;margin-bottom:14px;">
-                    <p style="color:#c060ff;margin:0 0 8px 0;font-weight:bold;">${s.tier.label} AI</p>
-                    <p style="color:#c060ff;margin:0 0 8px 0;">❤️ ${Math.max(0,Math.floor(s.aiHP))}/${s.aiMaxHP} HP</p>
-                    <div style="background:#000;border:2px solid #a020f0;border-radius:6px;height:22px;overflow:hidden;">
-                        <div style="background:linear-gradient(90deg,#6a00a0,#a020f0);height:100%;width:${Math.max(0,s.aiHP/s.aiMaxHP*100)}%;"></div>
-                    </div>
-                </div>
-
-                <div style="background:#0a0a0a;padding:12px;border-radius:8px;border-left:4px solid #a020f0;margin-bottom:14px;max-height:130px;overflow-y:auto;">
-                    ${s.log.slice(-8).map(l => `<p style="color:#0cf;font-size:12px;margin:2px 0;">• ${l}</p>`).join('')}
-                </div>
-
-                <div style="margin-bottom:10px;">${itemsHTML}</div>
-                <button onclick="doAIBetAction('guard')" style="width:100%;background:#1a3a3a;color:#0ef;padding:10px;border:2px solid #0ef;border-radius:6px;cursor:pointer;font-weight:bold;margin-bottom:8px;">🛡️ Guard</button>
-                <button onclick="surrenderAIBet()" style="width:100%;background:linear-gradient(135deg,#ff3333,#cc0000);color:#fff;padding:10px;font-weight:bold;border:none;border-radius:6px;cursor:pointer;">🛑 Surrender (forfeit bet)</button>
-            </div>`;
-
-            let container = document.getElementById('ai-bet-battle-container');
-            if(!container){ container = document.createElement('div'); container.id = 'ai-bet-battle-container'; document.body.appendChild(container); }
-            container.innerHTML = html;
+            box.innerHTML = itemsHTML +
+                `<button onclick="doAIBetAction('guard')" style="width:100%;background:#1a3a3a;color:#0ef;padding:9px;border:2px solid #0ef;border-radius:6px;cursor:pointer;font-weight:bold;font-size:12px;">🛡️ Guard</button>`;
         }
 
+        // ── COMBAT ────────────────────────────────────────────────
         function doAIBetAction(action, itemId){
             const s = aiBetState;
-            if(!s || !s.isActive) return;
+            if(!s || !s.isActive || s.actionsLocked) return;
             s.hunterGuarding = false;
+            s.actionsLocked = true;
+            renderAIDuelActions();
+
+            const hunterEl = document.getElementById('ai-duel-hunter-sprite');
+            const aiEl = document.getElementById('ai-duel-ai-sprite');
+
+            const finishHunterTurn = () => {
+                updateAIDuelHPBars();
+                renderAIDuelLog();
+                if(s.aiHP <= 0){
+                    s.log.push('🎉 The AI is defeated!');
+                    renderAIDuelLog();
+                    return endAIBetBattle(true);
+                }
+                aiBetTurn();
+            };
 
             if(action === 'guard'){
                 s.hunterGuarding = true;
                 s.log.push('🛡️ You brace and guard.');
-            } else if(action === 'attack'){
-                const dmg = Math.max(1, Math.floor(calculatePlayerDamage(USER)));
-                s.aiHP = Math.max(0, s.aiHP - dmg);
-                s.log.push(`⚔️ You strike for -${dmg} HP.`);
-            } else if(action === 'item' && itemId){
-                const item = ITEMS[itemId];
-                if(!item){ return; }
-                if(item.damage){
-                    const dmg = Math.max(1, Math.floor(Math.abs(item.damage)));
-                    s.aiHP = Math.max(0, s.aiHP - dmg);
-                    s.log.push(`⚔️ ${item.name}: -${dmg} HP to the AI.`);
-                } else if(item.heal){
-                    s.hunterHP = Math.min(s.hunterMaxHP, s.hunterHP + item.heal);
-                    s.log.push(`💚 ${item.name}: +${item.heal} HP recovered.`);
-                } else if(item.protect){
-                    s.hunterGuarding = true;
-                    s.log.push(`🛡️ ${item.name}: bracing for the next hit.`);
-                }
+                s.actionsLocked = false;
+                finishHunterTurn();
+                return;
             }
 
-            if(s.aiHP <= 0){ s.log.push('🎉 The AI is defeated!'); renderAIBetBattle(); return endAIBetBattle(true); }
-            aiBetTurn();
+            let animType = 'punch', dmg = 0, heal = 0, prot = 0, itemName = 'Bare Hands';
+            if(action === 'item' && itemId){
+                const item = ITEMS[itemId];
+                if(!item) { s.actionsLocked = false; return; }
+                animType = item.animation || 'punch';
+                itemName = item.name;
+                dmg = item.damage ? Math.abs(item.damage) : 0;
+                heal = item.heal || 0;
+                prot = item.protect || 0;
+            } else {
+                dmg = Math.max(1, Math.floor(calculatePlayerDamage(USER)));
+            }
+
+            playBattleAnimation(dmg ? animType : (heal ? 'healing' : 'shield'), hunterEl, dmg ? aiEl : hunterEl, () => {
+                if(dmg){
+                    s.aiHP = Math.max(0, s.aiHP - dmg);
+                    s.log.push(`⚔️ ${itemName}: -${dmg} HP to the AI.`);
+                    aiDuelFloatNumber('-'+dmg, '#f44', true);
+                } else if(heal){
+                    s.hunterHP = Math.min(s.hunterMaxHP, s.hunterHP + heal);
+                    s.log.push(`💚 ${itemName}: +${heal} HP recovered.`);
+                    aiDuelFloatNumber('+'+heal, '#0f0', false);
+                } else if(prot){
+                    s.hunterGuarding = true;
+                    s.log.push(`🛡️ ${itemName}: bracing for the next hit.`);
+                }
+                s.actionsLocked = false;
+                finishHunterTurn();
+            });
         }
 
         function decideAIBetAction(s){
@@ -12294,55 +12438,135 @@ hpMult and dmgMult range 0.5-3.0. aggression 0.2-0.99. rageThreshold 0.3-0.5 for
             const action = decideAIBetAction(s);
             s.aiGuarding = false;
 
+            const hunterEl = document.getElementById('ai-duel-hunter-sprite');
+            const aiEl = document.getElementById('ai-duel-ai-sprite');
+
             if(action === 'heal'){
                 const healAmt = Math.round(s.aiMaxHP * s.tier.healAmountPct);
-                s.aiHP = Math.min(s.aiMaxHP, s.aiHP + healAmt);
-                s.aiHealCooldown = s.tier.healCooldownTurns;
-                s.log.push(`💚 The AI heals for +${healAmt} HP.`);
-            } else if(action === 'guard'){
+                playBattleAnimation('healing', aiEl, aiEl, () => {
+                    s.aiHP = Math.min(s.aiMaxHP, s.aiHP + healAmt);
+                    s.aiHealCooldown = s.tier.healCooldownTurns;
+                    s.log.push(`💚 The AI heals for +${healAmt} HP.`);
+                    aiDuelFloatNumber('+'+healAmt, '#0f0', true);
+                    updateAIDuelHPBars(); renderAIDuelLog(); renderAIDuelActions();
+                });
+                return;
+            }
+            if(action === 'guard'){
                 s.aiGuarding = true;
                 s.log.push('🛡️ The AI braces defensively.');
-            } else {
-                let dmg = Math.max(1, Math.floor(s.aiDamage * (0.85 + Math.random()*0.3)));
-                if(s.hunterGuarding) dmg = Math.floor(dmg * 0.5);
-                s.hunterHP = Math.max(0, s.hunterHP - dmg);
-                s.log.push(`💥 The AI hits you for -${dmg} HP${s.hunterGuarding?' (guarded!)':''}.`);
+                renderAIDuelLog(); renderAIDuelActions();
+                return;
             }
 
-            renderAIBetBattle();
-            if(s.hunterHP <= 0){ s.log.push('💀 You have been defeated.'); renderAIBetBattle(); endAIBetBattle(false); }
+            // Attack — give the hunter a real Extreme Evasion window before it lands
+            const pool = AI_ATTACK_ANIM_POOL[s.tierKey] || AI_ATTACK_ANIM_POOL.normal;
+            const animType = pool[Math.floor(Math.random()*pool.length)];
+
+            showAIDuelDodgeWindow((dodged) => {
+                if(dodged){
+                    s.log.push('⚡ You EVADE the attack completely!');
+                    renderAIDuelLog(); renderAIDuelActions();
+                    return;
+                }
+                playBattleAnimation(animType, aiEl, hunterEl, () => {
+                    let dmg = Math.max(1, Math.floor(s.aiDamage * (0.85 + Math.random()*0.3)));
+                    if(s.hunterGuarding) dmg = Math.floor(dmg * 0.5);
+                    s.hunterHP = Math.max(0, s.hunterHP - dmg);
+                    s.log.push(`💥 The AI hits you for -${dmg} HP${s.hunterGuarding?' (guarded!)':''}.`);
+                    aiDuelFloatNumber('-'+dmg, '#f44', false);
+                    updateAIDuelHPBars(); renderAIDuelLog(); renderAIDuelActions();
+                    if(s.hunterHP <= 0){
+                        s.log.push('💀 You have been defeated.');
+                        renderAIDuelLog();
+                        endAIBetBattle(false);
+                    }
+                });
+            });
+        }
+
+        // Independent Extreme Evasion dodge window — visually matches the dungeon's,
+        // but kept fully separate so it can never touch raid state/closures.
+        const AI_DUEL_DODGE_WINDOW_MS = 650;
+        function showAIDuelDodgeWindow(callback){
+            const wrap = document.getElementById('ai-duel-hunter-wrap');
+            if(wrap) wrap.style.filter = 'drop-shadow(0 0 10px #f00)';
+            playSound && playSound('enemy_bar_warning');
+
+            const btn = document.createElement('button');
+            btn.textContent = '⚡ EXTREME EVASION';
+            btn.style.cssText = `position:fixed;left:50%;bottom:22%;transform:translateX(-50%);z-index:9600;padding:16px 28px;font-size:16px;font-weight:bold;color:#000;background:linear-gradient(180deg,#fff566,#ffd500);border:3px solid #fff;border-radius:50px;box-shadow:0 0 20px #ff0,0 4px 0 #b38f00;`;
+            let resolved = false;
+            const finish = (dodged) => {
+                if(resolved) return;
+                resolved = true;
+                btn.remove();
+                if(wrap) wrap.style.filter = '';
+                callback(dodged);
+            };
+            btn.onclick = () => {
+                btn.style.background = '#0f0';
+                btn.textContent = '✔ EVADED!';
+                playSound && playSound('evasion_swish');
+                setTimeout(() => finish(true), 250);
+            };
+            document.body.appendChild(btn);
+            setTimeout(() => finish(false), AI_DUEL_DODGE_WINDOW_MS);
         }
 
         function surrenderAIBet(){
+            if(!aiBetState || !aiBetState.isActive) return;
             if(!confirm('Surrender and forfeit your bet?')) return;
             endAIBetBattle(false);
         }
 
+        // ── RESULT + COLLECT BET ─────────────────────────────────
         function endAIBetBattle(won){
             const s = aiBetState;
             if(!s) return;
             s.isActive = false;
 
-            if(won){
-                const goldReturn = Math.round(s.betGold * s.tier.multiplier);
-                const xpReturn = Math.round(s.betXP * s.tier.multiplier);
-                db.collection("users").doc(USER.uid).update({
+            const goldReturn = won ? Math.round(s.betGold * s.tier.multiplier) : 0;
+            const xpReturn = won ? Math.round(s.betXP * s.tier.multiplier) : 0;
+
+            const box = document.getElementById('ai-duel-actions');
+            const logBox = document.getElementById('ai-duel-log');
+            if(logBox) logBox.style.display = 'none';
+            if(box){
+                box.innerHTML = `
+                <div style="text-align:center;background:rgba(0,0,0,0.85);padding:16px;border-radius:10px;border:2px solid ${won?'#0f0':'#f33'};">
+                    <p style="color:${won?'#0f0':'#f33'};font-size:18px;font-weight:bold;margin:0 0 8px 0;">${won?'🎉 VICTORY!':'💀 DEFEAT'}</p>
+                    <p style="color:#fff;font-size:13px;margin:0 0 14px 0;">${won ? `+${goldReturn} Gold, +${xpReturn} XP` : `You forfeit ${s.betGold} Gold and ${s.betXP} XP`}</p>
+                    <button onclick="collectAIBetAndReturn(${won},${goldReturn},${xpReturn},event)" style="padding:12px 28px;background:linear-gradient(135deg,#0a4a0a,#0a2a0a);color:#0f0;border:2px solid #0f0;border-radius:8px;font-size:14px;font-weight:bold;cursor:pointer;letter-spacing:1px;">💰 COLLECT BET</button>
+                </div>`;
+            }
+            playSound(won ? 'victory' : 'damage');
+        }
+
+        function collectAIBetAndReturn(won, goldReturn, xpReturn, evt){
+            if(window._aiBetCollectDone) return;
+            window._aiBetCollectDone = true;
+            if(evt){ try{ evt.preventDefault(); evt.stopPropagation(); }catch(e){} }
+
+            const payout = won
+                ? db.collection("users").doc(USER.uid).update({
                     gold: firebase.firestore.FieldValue.increment(goldReturn),
                     xp: firebase.firestore.FieldValue.increment(xpReturn)
-                }).then(() => {
-                    alert(`🎉 Victory! You beat the ${s.tier.label} AI.\n+${goldReturn} Gold, +${xpReturn} XP returned.`);
-                    playSound('victory');
-                    const c = document.getElementById('ai-bet-battle-container'); if(c) c.innerHTML='';
+                  })
+                : Promise.resolve();
+
+            payout.then(() => {
+                const overlay = document.getElementById('ai-duel-overlay');
+                if(overlay){ overlay.style.transition = 'opacity 0.6s ease'; overlay.style.opacity = '0'; }
+                setTimeout(() => {
+                    if(overlay){ overlay.classList.remove('active'); overlay.remove(); }
                     aiBetState = null;
+                    window._aiBetCollectDone = false;
                     reload();
-                }).catch(err => alert('❌ Error paying out: '+err.message));
-            } else {
-                alert(`💀 Defeat. You forfeit your bet of ${s.betGold} Gold and ${s.betXP} XP.`);
-                playSound('damage');
-                const c = document.getElementById('ai-bet-battle-container'); if(c) c.innerHTML='';
-                aiBetState = null;
-                reload();
-            }
+                    // Tap-guard against any trailing ghost-click on the dashboard underneath
+                    setTimeout(() => { document.querySelectorAll('.section:not(.hidden)').forEach(sec => { sec.style.pointerEvents=''; }); }, 600);
+                }, 650);
+            }).catch(err => { window._aiBetCollectDone = false; alert('❌ Error paying out: '+err.message); });
         }
 
         function endBattle1v1(winnerId) {
